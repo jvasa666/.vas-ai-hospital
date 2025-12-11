@@ -1,0 +1,16 @@
+# AI-API Host Dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install dependencies for the AI-API core, and a basic web server
+# Added 'tree' for zfp_codex, 'requests' for external calls placeholder, 'pydantic' for FastAPI/negotiator
+RUN pip install --no-cache-dir uvicorn fastapi pydantic requests 'ray[rllib]' numpy tree
+
+COPY ai_api.py .
+COPY capabilities/ ./capabilities/
+
+EXPOSE 8088
+
+# Command to run the AI-API host (uvicorn example for fast API routing)
+CMD ["uvicorn", "ai_api:app", "--host", "0.0.0.0", "--port", "8088"]

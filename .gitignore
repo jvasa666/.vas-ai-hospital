@@ -1,0 +1,55 @@
+# Environment files with secrets
+.env
+.env.vas
+.env.local
+.env.production
+
+# Secrets directory
+secrets/
+*.key
+*.pem
+
+# Logs
+*.log
+logs/
+vas-backups/
+
+# Node modules
+node_modules/
+**/node_modules/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Java/Gradle
+.gradle/
+build/
+target/
+*.class
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+.docker/
+
+# Temporary files
+*.tmp
+*.temp

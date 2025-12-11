@@ -1,0 +1,364 @@
+version: '3.8'
+
+# VAS-AI-Hospital - ZFP Causal Anchor Edition
+# Full microservices stack with AI-API integration
+
+networks:
+  vas-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.25.0.0/16
+
+volumes:
+  vas-patient-db-data:
+  vas-clinical-db-data:
+  vas-admin-db-data:
+  vas-analytics-db-data:
+  vas-redis-data:
+  vas-minio-data:
+
+services:
+  # ==========================================
+  # CORE INFRASTRUCTURE
+  # ==========================================
+  
+  # PostgreSQL - Patient Database
+  vas-patient-db:
+    image: postgres:15-alpine
+    container_name: vas-patient-db
+    environment:
+      POSTGRES_DB: vas_patients
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${PATIENT_DB_PASSWORD}
+    volumes:
+      - vas-patient-db-data:/var/lib/postgresql/data
+      - ./scripts/sql/patient-schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./vas-demo/seed-demo-patients.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+    networks:
+      - vas-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # PostgreSQL - Clinical Database
+  vas-clinical-db:
+    image: postgres:15-alpine
+    container_name: vas-clinical-db
+    environment:
+      POSTGRES_DB: vas_clinical
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${CLINICAL_DB_PASSWORD}
+    volumes:
+      - vas-clinical-db-data:/var/lib/postgresql/data
+      - ./scripts/sql/clinical-schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    networks:
+      - vas-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # PostgreSQL - Admin Database
+  vas-admin-db:
+    image: postgres:15-alpine
+    container_name: vas-admin-db
+    environment:
+      POSTGRES_DB: vas_admin
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${ADMIN_DB_PASSWORD}
+    volumes:
+      - vas-admin-db-data:/var/lib/postgresql/data
+    networks:
+      - vas-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # PostgreSQL - Analytics Database
+  vas-analytics-db:
+    image: postgres:15-alpine
+    container_name: vas-analytics-db
+    environment:
+      POSTGRES_DB: vas_analytics
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${ANALYTICS_DB_PASSWORD}
+    volumes:
+      - vas-analytics-db-data:/var/lib/postgresql/data
+    networks:
+      - vas-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Redis - Caching & Session Management
+  vas-redis:
+    image: redis:7-alpine
+    container_name: vas-redis
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - vas-redis-data:/data
+    networks:
+      - vas-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # MinIO - Object Storage (DICOM, Documents)
+  vas-minio:
+    image: minio/minio:latest
+    container_name: vas-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - vas-minio-data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks:
+      - vas-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+
+  # ==========================================
+  # VAS-AI-GATEWAY (Capability Router)
+  # ==========================================
+  
+  vas-ai-gateway:
+    build:
+      context: ./services/vas-ai-gateway
+      dockerfile: Dockerfile
+    container_name: vas-ai-gateway
+    ports:
+      - "8888:8888"
+    environment:
+      - PORT=8888
+      - REDIS_HOST=vas-redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - LOG_LEVEL=INFO
+      - ZFP_MODE=PRODUCTION
+    depends_on:
+      vas-redis:
+        condition: service_healthy
+    networks:
+      - vas-network
+    volumes:
+      - ./services/vas-ai-gateway/capabilities:/app/capabilities:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8888/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+
+  # ==========================================
+  # MICROSERVICES
+  # ==========================================
+
+  # Patient Service - Capability Orchestrator
+  vas-patient-service:
+    build:
+      context: ./services/patient-service
+      dockerfile: Dockerfile
+    container_name: vas-patient-service
+    ports:
+      - "8081:8080"
+    environment:
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://vas-patient-db:5432/vas_patients
+      - SPRING_DATASOURCE_USERNAME=postgres
+      - SPRING_DATASOURCE_PASSWORD=${PATIENT_DB_PASSWORD}
+      - AI_GATEWAY_URL=http://vas-ai-gateway:8888
+      - REDIS_HOST=vas-redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    depends_on:
+      vas-patient-db:
+        condition: service_healthy
+      vas-ai-gateway:
+        condition: service_healthy
+    networks:
+      - vas-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+
+  # Clinical Service - ML Capability Consumer
+  vas-clinical-service:
+    build:
+      context: ./services/clinical-service
+      dockerfile: Dockerfile
+    container_name: vas-clinical-service
+    ports:
+      - "8082:8080"
+    environment:
+      - SPRING_DATASOURCE_URL=jdbc:postgresql://vas-clinical-db:5432/vas_clinical
+      - SPRING_DATASOURCE_USERNAME=postgres
+      - SPRING_DATASOURCE_PASSWORD=${CLINICAL_DB_PASSWORD}
+      - AI_GATEWAY_URL=http://vas-ai-gateway:8888
+      - PATIENT_SERVICE_URL=http://vas-patient-service:8080
+    depends_on:
+      vas-clinical-db:
+        condition: service_healthy
+      vas-ai-gateway:
+        condition: service_healthy
+      vas-patient-service:
+        condition: service_healthy
+    networks:
+      - vas-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+
+  # Admin Service - User Management
+  vas-admin-service:
+    build:
+      context: ./services/admin-service
+      dockerfile: Dockerfile
+    container_name: vas-admin-service
+    ports:
+      - "8083:3000"
+    environment:
+      - PORT=3000
+      - DATABASE_URL=postgresql://postgres:${ADMIN_DB_PASSWORD}@vas-admin-db:5432/vas_admin
+      - AI_GATEWAY_URL=http://vas-ai-gateway:8888
+      - NODE_ENV=production
+    depends_on:
+      vas-admin-db:
+        condition: service_healthy
+      vas-ai-gateway:
+        condition: service_healthy
+    networks:
+      - vas-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+
+  # Analytics Service - BI & Forecasting
+  vas-analytics-service:
+    build:
+      context: ./services/analytics-service
+      dockerfile: Dockerfile
+    container_name: vas-analytics-service
+    ports:
+      - "8084:5000"
+    environment:
+      - FLASK_ENV=production
+      - DATABASE_URL=postgresql://postgres:${ANALYTICS_DB_PASSWORD}@vas-analytics-db:5432/vas_analytics
+      - AI_GATEWAY_URL=http://vas-ai-gateway:8888
+      - PATIENT_SERVICE_URL=http://vas-patient-service:8080
+      - CLINICAL_SERVICE_URL=http://vas-clinical-service:8080
+    depends_on:
+      vas-analytics-db:
+        condition: service_healthy
+      vas-ai-gateway:
+        condition: service_healthy
+    networks:
+      - vas-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+
+  # AI Communication Service (Legacy - for staff chat)
+  vas-ai-comm-service:
+    build:
+      context: ./services/ai-comm-service
+      dockerfile: Dockerfile
+    container_name: vas-ai-comm-service
+    ports:
+      - "8085:3001"
+    environment:
+      - PORT=3001
+      - JWT_SECRET=${JWT_SECRET:-vas-jwt-secret-change-me}
+      - AI_GATEWAY_URL=http://vas-ai-gateway:8888
+      - NODE_ENV=production
+    depends_on:
+      - vas-ai-gateway
+    networks:
+      - vas-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+
+  # Staff Communication Dashboard (Frontend)
+  vas-staff-dashboard:
+    build:
+      context: ./services/staff-comm-dashboard
+      dockerfile: Dockerfile
+    container_name: vas-staff-dashboard
+    ports:
+      - "3001:3000"
+    environment:
+      - NODE_ENV=production
+      - AI_COMM_SERVICE_URL=http://vas-ai-comm-service:3001
+    depends_on:
+      - vas-ai-comm-service
+    networks:
+      - vas-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+
+  # ==========================================
+  # MONITORING (Optional)
+  # ==========================================
+
+  # Redis Commander - Web UI for Redis
+  vas-redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: vas-redis-commander
+    environment:
+      - REDIS_HOSTS=local:vas-redis:6379:0:${REDIS_PASSWORD}
+    ports:
+      - "8087:8081"
+    depends_on:
+      - vas-redis
+    networks:
+      - vas-network
+    restart: unless-stopped
